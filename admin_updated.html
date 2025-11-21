@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Admin — Product Editor & GitHub Uploader (Updated)</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:18px;background:#0f1720;color:#e6eef6}
+    .box{background:#111827;padding:16px;border-radius:8px;border:1px solid #1f2937;margin-bottom:12px}
+    input,select,button,textarea{padding:8px;border-radius:6px;border:1px solid #2b3440;background:#0b1220;color:inherit}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:8px;border-bottom:1px solid #1f2937;text-align:left}
+    th{background:#0b1220;position:sticky;top:0}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .small{font-size:13px;color:#9aa0a6}
+    .danger{background:#7f1d1d;color:#fff}
+    .primary{background:#0ea5a4;color:#012} 
+    .success{background:#16a34a;color:#012}
+    .muted{color:#94a3b8}
+    .wide{width:100%}
+    .note{font-size:13px;color:#9aa0a6;margin-top:8px}
+    .badge{display:inline-block;padding:4px 8px;border-radius:6px;background:#0b1220;border:1px solid #1f2937;margin-left:8px}
+  </style>
+</head>
+<body>
+  <h2>Admin Panel — Excel Upload & GitHub Auto-Upload (Updated)</h2>
+  <div class="box">
+    <div class="small">1) Load items from Excel (local). Supported: .xlsx, .xls, .csv</div>
+    <div class="controls" style="margin-top:8px;">
+      <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" />
+      <button id="loadPresetBtn" class="primary">Load preset 807 items</button>
+      <button id="downloadJsonBtn" class="primary">Download data.json</button>
+      <button id="resetBtn" class="muted">Reset table</button>
+    </div>
+    <div class="note">Preset file path (local): <code id="samplePath">/mnt/data/Give a full excel of all Items in this file.xlsx</code> <span class="badge">Preset included</span></div>
+  </div>
+
+  <div class="box">
+    <div class="small">2) Edit items (click row to edit; use Add / Delete)</div>
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button id="addRowBtn" class="success">Add Row</button>
+      <button id="deleteRowBtn" class="danger">Delete Selected Row</button>
+      <span class="small muted">Select a row (click) to edit. Edits are inline.</span>
+    </div>
+    <div style="overflow:auto;max-height:56vh;margin-top:10px">
+      <table id="table"><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="small">3) Upload updated data.json directly to GitHub (requires Personal Access Token)</div>
+    <div style="margin-top:8px" class="controls">
+      <input id="ghOwner" placeholder="GitHub owner (username/org)" />
+      <input id="ghRepo" placeholder="Repo name" />
+      <input id="ghPath" value="data.json" placeholder="File path in repo (e.g. data.json)" />
+      <input id="ghBranch" value="main" placeholder="Branch (default: main)" />
+    </div>
+    <div style="margin-top:8px" class="controls">
+      <input id="ghToken" placeholder="GitHub Personal Access Token (paste here)" style="width:420px" />
+      <button id="uploadGhBtn" class="primary">Upload to GitHub (Save to repo)</button>
+    </div>
+    <div class="small muted" style="margin-top:8px">
+      <strong>Security:</strong> Use a repo-scoped short-lived token if possible. Do <em>NOT</em> share your token. This page will not send your token anywhere except GitHub's API when you click Upload.
+    </div>
+  </div>
+
+  <div class="box small muted">
+    <strong>How it works:</strong>
+    <ol>
+      <li>Load Excel → it converts to a JSON structure with columns and rows.</li>
+      <li>Edit / add / delete rows inline.</li>
+      <li>Download data.json or upload directly to your GitHub repo using a Personal Access Token.</li>
+    </ol>
+  </div>
+
+<script>
+// Uses SheetJS (cdn)
+const sheetJsCdn = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+const s = document.createElement('script'); s.src = sheetJsCdn; document.head.appendChild(s);
+
+// Preset data endpoint (the developer-provided local path)
+// The admin page will try to fetch this path when you click 'Load preset'.
+// Hosting note: When hosted on GitHub/Vercel, fetching local file paths won't work —
+const presetFilePath = document.getElementById('samplePath').innerText.trim();
+
+let columns = ['SKU','Particulars','Colors','Sample Price (1-9 pc)','Bulk Price (excl. GST)','Remarks'];
+let rows = []; // list of objects {SKU:..., Particulars:..., ...}
+let selectedRow = null;
+
+function renderTable() {
+  const thead = document.getElementById('thead');
+  const tbody = document.getElementById('tbody');
+  thead.innerHTML = '<tr>' + columns.map(c=>'<th>'+c+'</th>').join('') + '<th>__select</th></tr>';
+  let html = '';
+  rows.forEach((r, idx) => {
+    html += '<tr data-idx="'+idx+'">';
+    for (let c of columns) html += '<td contenteditable="true" data-col="'+c+'">'+escapeHtml(r[c]||'')+'</td>';
+    html += '<td><input type="radio" name="selRow" data-idx="'+idx+'"></td></tr>';
+  });
+  tbody.innerHTML = html;
+
+  // attach listeners for inline edits & row clicks
+  document.querySelectorAll('#tbody tr').forEach(tr=>{
+    tr.addEventListener('click', () => {
+      const idx = parseInt(tr.getAttribute('data-idx'));
+      selectedRow = idx;
+      document.querySelectorAll('input[name="selRow"]').forEach(rb => rb.checked = false);
+      const rb = tr.querySelector('input[name="selRow"]');
+      if (rb) rb.checked = true;
+    });
+    tr.querySelectorAll('td[contenteditable]').forEach(td=>{
+      td.addEventListener('input', () => {
+        const idx = parseInt(tr.getAttribute('data-idx'));
+        const col = td.getAttribute('data-col');
+        rows[idx][col] = td.innerText;
+      });
+    });
+  });
+}
+
+// Escape helper
+function escapeHtml(t){ return String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// File input read
+document.getElementById('fileInput').addEventListener('change', (e)=>{
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  if (f.name.endsWith('.csv')) {
+    reader.onload = () => parseCsv(reader.result);
+    reader.readAsText(f);
+  } else {
+    reader.onload = (ev) => {
+      const data = new Uint8Array(ev.target.result);
+      const wb = XLSX.read(data, {type:'array'});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const arr = XLSX.utils.sheet_to_json(ws, {header:1});
+      consumeArray(arr);
+    };
+    reader.readAsArrayBuffer(f);
+  }
+});
+
+// Load preset: attempts to fetch the included Excel file path (works if hosted where that path is accessible, or if serving locally)
+document.getElementById('loadPresetBtn').addEventListener('click', async ()=>{
+  try {
+    // Attempt to fetch presetFilePath as a URL
+    const resp = await fetch(presetFilePath);
+    if (!resp.ok) throw new Error('Could not fetch preset file — check path or serve it via HTTP');
+    const ab = await resp.arrayBuffer();
+    const data = new Uint8Array(ab);
+    const wb = XLSX.read(data, {type:'array'});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const arr = XLSX.utils.sheet_to_json(ws, {header:1});
+    consumeArray(arr);
+  } catch (err) {
+    // If fetching fails, attempt to load the included data_preset.json (recommended)
+    try {
+      const resp2 = await fetch('data_preset.json');
+      if (!resp2.ok) throw new Error('Could not load data_preset.json: ' + resp2.status);
+      const j = await resp2.json();
+      columns = j.columns;
+      rows = j.rows;
+      renderTable();
+    } catch (err2) {
+      alert('Load preset failed: ' + err.message + '\nAlso failed to load data_preset.json: ' + err2.message);
+    }
+  }
+});
+
+function parseCsv(text) {
+  const rowsA = text.split('\n').map(r=>r.split(','));
+  consumeArray(rowsA);
+}
+
+function consumeArray(arr) {
+  if (!arr || !arr.length) return;
+  const hdr = arr[0].map(h => String(h).trim());
+  columns = hdr;
+  rows = [];
+  for (let i=1;i<arr.length;i++) {
+    const r = arr[i];
+    if (!r) continue;
+    const obj = {};
+    for (let j=0;j<hdr.length;j++) obj[hdr[j]] = r[j] || '';
+    rows.push(obj);
+  }
+  renderTable();
+}
+
+// Add / Delete rows
+document.getElementById('addRowBtn').addEventListener('click', ()=>{
+  const obj = {};
+  for (let c of columns) obj[c] = '';
+  rows.push(obj);
+  renderTable();
+});
+
+document.getElementById('deleteRowBtn').addEventListener('click', ()=>{
+  if (selectedRow === null) { alert('Select a row first (click a row).'); return; }
+  rows.splice(selectedRow,1);
+  selectedRow = null;
+  renderTable();
+});
+
+// Download data.json
+document.getElementById('downloadJsonBtn').addEventListener('click', ()=>{
+  const payload = { columns: columns, rows: rows };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'data.json'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+// Reset table
+document.getElementById('resetBtn').addEventListener('click', ()=>{ rows = []; renderTable(); });
+
+// ============= GitHub Upload logic =============
+async function uploadToGitHub() {
+  const owner = document.getElementById('ghOwner').value.trim();
+  const repo = document.getElementById('ghRepo').value.trim();
+  const path = document.getElementById('ghPath').value.trim() || 'data.json';
+  const branch = document.getElementById('ghBranch').value.trim() || 'main';
+  const token = document.getElementById('ghToken').value.trim();
+  if (!owner || !repo || !token) return alert('Owner, repo and token are required.');
+
+  const payloadObj = { columns: columns, rows: rows };
+  const contentStr = JSON.stringify(payloadObj, null, 2);
+  const contentBase64 = btoa(unescape(encodeURIComponent(contentStr)));
+
+  const apiBase = 'https://api.github.com';
+  const getUrl = apiBase + '/repos/' + owner + '/' + repo + '/contents/' + encodeURIComponent(path) + '?ref=' + encodeURIComponent(branch);
+  try {
+    const getResp = await fetch(getUrl, { headers: { Authorization: 'token ' + token } });
+    let sha = null;
+    if (getResp.status === 200) { const j = await getResp.json(); sha = j.sha; }
+    const putBody = { message: 'Update data.json via Admin Panel', content: contentBase64, branch: branch };
+    if (sha) putBody.sha = sha;
+    const putUrl = apiBase + '/repos/' + owner + '/' + repo + '/contents/' + encodeURIComponent(path);
+    const putResp = await fetch(putUrl, { method: 'PUT', headers: { Authorization: 'token ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(putBody) });
+    if (!putResp.ok) throw new Error('GitHub API error: ' + putResp.status + ' ' + await putResp.text());
+    const result = await putResp.json();
+    alert('Successfully uploaded to GitHub. File URL: ' + result.content.html_url);
+  } catch (err) {
+    alert('Upload failed: ' + err.message + '\n\nTip: Ensure token has repo permissions and branch exists.');
+  }
+}
+
+document.getElementById('uploadGhBtn').addEventListener('click', ()=>{
+  if (!confirm('Upload current data.json to GitHub? This action will use the token you provided.')) return;
+  uploadToGitHub();
+});
+
+// Auto-load empty table at start
+renderTable();
+</script>
+</body>
+</html>
